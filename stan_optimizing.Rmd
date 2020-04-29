@@ -1,0 +1,105 @@
+---
+author: "Spencer Seale"
+date: "3/4/2020"
+output: html_document
+---
+
+```{r, message=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+### Introduction
+
+Here, we have a dataset of transcript counts of 40 microbial taxa, collected at 100 time intervals over a 1.0 s long period. Using this data, we're on interested in determining if there are any groupings of the taxa into distince communities. In microbial communities there are correlations between different taxa much of the time that is due to some commonality between the taxa. 
+
+First, lets look to see if there are any correlations between the transcript counts in the different taxa by plotting the correlations of 10 randomly selected taxa.
+
+```{r}
+taxa <- read.table('/Users/spencerseale/Desktop/University-Oregon/bi610_Adv_Bio_Stats/hw18/taxon_counts.csv', header = TRUE, sep = ",", row.names = 1)
+
+set.seed(2)
+pairs(taxa[,sample(2:40, 10)])
+```
+
+There appears to be some correlations between some of the taxa while there is zero correlation between others. This is what is expected as in many instances microbial taxa will have similar abundances as others while having drastically different abundances than other. 
+
+### Constructing a model
+
+Now, by constructing a model for these taxa, we can examine the proportions of taxa in separate communitites and compare these groups to eachother. In our model we are trying to determine parameter values mainly for the overall abundance of each taxa, and the proportion of abundance attributed to each community over the time interval. We will split the taxa into 3 communitites and model the abundances from being pulled out of a poisson distribution because the abundances are recorded as transcript counts. Additionally, we are using a dirichlet distribution to determine the proportions of abundance coming from each community because the abundance data are continuous and multivariate. For determining the the abundance across each taxa, we sample from a normal distribution containing a standard deviation that has a prior of with a normal distribution and a standard deviation of 10 to account for variability. 
+
+```{r}
+#compiling stan model
+library(rstan)
+nmf_model <- stan_model(model_code="
+    data {
+      int N; // # samples
+      int L; // # taxa
+      int K; // # clusters
+      int Z[N,L];
+    }
+    parameters {
+      matrix<lower=0>[L,K] x;
+      vector[L] y;
+      simplex[K] w[N];
+      real<lower=0> eta;
+      vector<lower=0>[K] alpha;
+      real<lower=0> d_alpha;
+    }
+    model {
+      for (i in 1:N) {
+          Z[i] ~ poisson(x * w[i]);
+          w[i] ~ dirichlet(d_alpha * alpha);
+      }
+      for (j in 1:K) 
+          { x[,j] ~ normal(y, eta); }
+      y ~ normal(0, 20);
+      alpha ~ normal(0, 1);
+      d_alpha ~ exponential(0.2);
+      eta ~ normal(0, 10);
+    }
+    ")
+```
+
+Once compiling the stan model, we will optimize off of it using 3 communities to group the taxa. By optimizing we are having stan find the maximum liklihood rather than iteratively sample a number of the parameters in the model and use the mean in downstream analysis. The values achieved from optimizing compared to sampling are essentially the same, except through optimizing we do not get any values of uncertainity. However, optimizing is much faster since the most likely values are found and then reported compared to constantly walking around the model space to achieve parameter values that fit the model. 
+
+```{r}
+#using optimzing to find the maximum liklihood. Optimizing is finding the mode basically. It is also much faster than sampling. Sampling looks for all the possible values for a number of iterations and chains and gives uncertainty. Optimizing walks up the hill to the max liklihood then stops. The mean of all the sampling values will be about the same as the mode achieved from running optimizing.
+N <- nrow(taxa)
+L <- ncol(taxa[2:ncol(taxa)])
+K <- 3
+Z <- taxa[,2:(L+1)]
+set.seed(1)
+op_model <- optimizing(nmf_model, data=list(N=N, L=L, K=K, Z=Z))
+```
+
+### Examine the output
+
+Since we were optimizing not sampling the model, we do not need to evaluate mixing or report how each of the parameter values were estimated each instance of the random walking and instead achieve independent numbers. First, we can examine the relative contributions in abundance from each of the three communitites across the time interval. 
+
+```{r}
+opt_w <- op_model$par[grepl("^w", names(op_model$par))]
+
+clust_1 <- opt_w[1:100]
+clust_2 <- opt_w[101:200]
+clust_3 <- opt_w[201:300]
+
+plot(x=taxa[,1], y=clust_1, type="l", col = 1, xlab = "Time", ylab = "Proportion of Abundance", main = "Proportion of Community Transcript Abundance Over Time")
+lines(x=taxa[,1], y=clust_2, col = 2)
+lines(x=taxa[,1], y=clust_3, col = 4)
+legend("topright", col = c(1,2,4), lty = c(1,1,1), box.lty = 0, legend = c("C 1", "C 2", "C 3"))
+```
+
+Over time the proportion of abundances of each cluster fluctuate. It's difficult to predict what these clusters would do if the time interval was extended past 1.0, but it would likely continue to fluctuate just as it does in the recorded window. The contributions of each cluster are indeed changing over time as shown by the above figure. This is likely due to some interactions taking place within the separate taxa communities that effect how the other communities' abundances are. This fluctuation is much more interesting than all of the communitites remaining uniform and provides evidence that once taxa are grouped into subpopulations, these subpopulations are interacting with eachother. 
+
+Lastly, we will analyze the mean abundance of each taxon in each cluster to see the differences in abundace in these separated communitites. 
+
+```{r}
+opt_x <- op_model$par[grepl("^x", names(op_model$par))]
+
+plot(opt_x[1:40], lty = 1, col = 1, type = "l", xlab = "Taxon", ylab = "Transcript Abundance", main = "Taxon Abundance Across Communities")
+lines(opt_x[41:80], col = 2, type = "l", lty = 2)
+lines(opt_x[81:length(opt_x)], col = 4, type = "l", lty = 3)
+legend("topright", col = c(1,2,4), lty = c(1,2,3), box.lty = 0, legend = c("C 1", "C 2", "C 3"))
+```
+
+Looking at the above figure, communitites 2 and 3 have more similar transcript abundances in each taxa than either do to community 1. However, there is not perfect overlap between communities 2 and 3 and there is some variance. Taxa 3, 4, 8, 10, 12, 18, 19, and 38 have similar abundances in all of the communitites, but besides these the rest of the communities show some variation. Taxa 25 - 29 is perhaps the most interesting piece of the figure because there are the most significant differences between 1 compared to 2 and 3 and these taxa are likely competing for some resource or having inverse growth cycles. This figure does a good job at illustrating the dynamic microbial taxa examined in this data and providing evidence that relationships between microbial subpopulations exist and effect abundance. 
